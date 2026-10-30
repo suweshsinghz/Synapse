@@ -27,15 +27,98 @@ def environment_hash(track: TrackGeometry, config_path: Path) -> str:
 
 def scripted_action(env: RacingEnv) -> np.ndarray:
     """A deliberately small controller used only for simulator smoke tests."""
+    def scripted_action(env: RacingEnv) -> np.ndarray:
+    """Corner-aware baseline controller with early braking."""
 
-    projection = env.track.project(np.array([env.state.x, env.state.y], dtype=np.float64))
-    curvature = env.track.curvature_at_s(projection.s + max(15.0, env.state.speed * 0.75))
-    desired_angle = np.arctan(env.config.car.wheelbase_m * curvature)
-    steering = desired_angle / env.config.car.max_steering_rad
+    
+def scripted_action(env: RacingEnv) -> np.ndarray:
+    """Corner-aware baseline controller with early braking."""
+
+    projection = env.track.project(
+        np.array([env.state.x, env.state.y], dtype=np.float64)
+    )
+
+    speed = env.state.speed
+    car = env.config.car
+
+    lookahead = max(15.0, speed * 0.75)
+    curvature = env.track.curvature_at_s(projection.s + lookahead)
+
+    desired_angle = np.arctan(car.wheelbase_m * curvature)
+    steering = desired_angle / car.max_steering_rad
     steering -= 0.9 * np.clip(projection.lateral_offset / 8.0, -1.0, 1.0)
-    steering -= 0.8 * env.track.observation_heading_error(env.state.heading, projection)
-    throttle = 0.65 if env.state.speed < 35.0 else 0.35
-    return np.clip(np.asarray([steering, throttle], dtype=np.float64), -1.0, 1.0)
+    steering -= 0.8 * env.track.observation_heading_error(
+        env.state.heading, projection
+    )
+
+    target_speed = car.max_speed_mps
+
+    for distance in [15.0, 40.0, 80.0]:
+        future_curvature = env.track.curvature_at_s(projection.s + distance)
+        corner_speed = (
+            car.peak_lateral_accel_mps2
+            / max(abs(future_curvature), 1e-4)
+        ) ** 0.5
+
+        corner_speed *= 0.85
+        allowed_speed = (corner_speed ** 2 + 2.0 * 5.0 * distance) ** 0.5
+        target_speed = min(target_speed, allowed_speed)
+
+    longitudinal = np.clip((target_speed - speed) * 0.25, -1.0, 0.65)
+
+    return np.clip(
+        np.asarray([steering, longitudinal], dtype=np.float64),
+        -1.0,
+        1.0
+    )
+
+
+    # Steer using curvature ahead, not just the current track position.
+    lookahead = max(15.0, speed * 0.75)
+    curvature = env.track.curvature_at_s(projection.s + lookahead)
+
+    desired_angle = np.arctan(car.wheelbase_m * curvature)
+    steering = desired_angle / car.max_steering_rad
+    steering -= 0.9 * np.clip(projection.lateral_offset / 8.0, -1.0, 1.0)
+    steering -= 0.8 * env.track.observation_heading_error(
+        env.state.heading, projection
+    )
+
+    # Estimate safe speeds at several distances ahead.
+    target_speed = car.max_speed_mps
+
+    for distance in [15.0, 40.0, 80.0]:
+        future_curvature = env.track.curvature_at_s(projection.s + distance)
+
+        corner_speed = (
+            car.peak_lateral_accel_mps2
+            / max(abs(future_curvature), 1e-4)
+        ) ** 0.5
+
+        # Leave a safety margin for the corner.
+        corner_speed *= 0.85
+
+        # Brake early enough to reach that speed before the corner.
+        allowed_speed = (
+            corner_speed ** 2 + 2.0 * 5.0 * distance
+        ) ** 0.5
+
+        target_speed = min(target_speed, allowed_speed)
+
+    # Positive = throttle; negative = braking.
+    longitudinal = np.clip(
+        (target_speed - speed) * 0.25,
+        -1.0,
+        0.65
+    )
+
+    return np.clip(
+        np.asarray([steering, longitudinal], dtype=np.float64),
+        -1.0,
+        1.0
+    )
+
+
 
 
 def run(track_path: Path, config_path: Path, steps: int, participant_id: str) -> dict[str, object]:
